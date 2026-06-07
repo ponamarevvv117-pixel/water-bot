@@ -343,8 +343,25 @@ async def reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning("Reminder failed for %s: %s", chat_id, e)
 
+# ── Ежедневная реклама в 12:00 МСК ─────────────────────────────────
+async def promo_job(ctx: ContextTypes.DEFAULT_TYPE):
+    for user in all_users():
+        chat_id = user["chat_id"]
+        try:
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text="Если не сложно, подпишись на автора в инстаграмме;)",
+            )
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text="https://www.instagram.com/alleksashka.a?igsh=MTZ2OGx5eXd2b2xoYw%3D%3D&utm_source=qr",
+            )
+        except Exception as e:
+            logger.warning("Promo failed for %s: %s", chat_id, e)
+
 # ── Запуск ──────────────────────────────────────────────────────────
 def main():
+    import datetime as dt
     init_db()
 
     app = Application.builder().token(TOKEN).build()
@@ -352,10 +369,14 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # Первый запуск напоминалки — в начале следующего часа
+    # Напоминалка каждый час — в начале следующего часа
     now  = datetime.now(MSK)
     secs = (60 - now.minute) * 60 - now.second
     app.job_queue.run_repeating(reminder_job, interval=3600, first=secs)
+
+    # Реклама каждый день в 12:00 МСК (= 09:00 UTC)
+    app.job_queue.run_daily(promo_job, time=dt.time(9, 0, 0, tzinfo=timezone.utc))
+
     logger.info("Бот запущен. Первое напоминание через %d сек.", secs)
 
     app.run_polling(drop_pending_updates=True)
