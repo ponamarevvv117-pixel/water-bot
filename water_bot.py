@@ -17,9 +17,8 @@ from telegram.ext import (
     ContextTypes, MessageHandler, filters,
 )
 
-# Токен берётся из переменной окружения BOT_TOKEN (Railway),
-# при локальном запуске — из значения по умолчанию.
-TOKEN = os.environ.get("BOT_TOKEN", "8932702484:AAHs2TbHiQX_e_TpSAQelZDrijNx5ssL5WY")
+# Токен берётся из переменной окружения BOT_TOKEN
+TOKEN = os.environ["BOT_TOKEN"]
 
 MSK = timezone(timedelta(hours=3))
 
