@@ -56,9 +56,14 @@ def init_db():
             );
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                chat_id INTEGER NOT NULL
+                chat_id INTEGER NOT NULL,
+                name    TEXT
             );
         """)
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN name TEXT")
+        except Exception:
+            pass
 
 # ── Работа с данными ────────────────────────────────────────────────
 def today_msk() -> str:
@@ -94,18 +99,23 @@ def save_goal(user_id: int, goal: int):
             (user_id, goal),
         )
 
-def register_user(user_id: int, chat_id: int):
+def register_user(user_id: int, chat_id: int, name: str):
     with db() as conn:
         conn.execute(
-            "INSERT INTO users (user_id, chat_id) VALUES (?, ?)"
-            " ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id",
-            (user_id, chat_id),
+            "INSERT INTO users (user_id, chat_id, name) VALUES (?, ?, ?)"
+            " ON CONFLICT(user_id) DO UPDATE SET chat_id=excluded.chat_id, name=excluded.name",
+            (user_id, chat_id, name),
         )
+
+def get_user_name(user_id: int) -> str:
+    with db() as conn:
+        row = conn.execute("SELECT name FROM users WHERE user_id=?", (user_id,)).fetchone()
+    return row["name"] if row and row["name"] else str(user_id)
 
 def all_users() -> list[dict]:
     with db() as conn:
         return [dict(r) for r in conn.execute(
-            "SELECT user_id, chat_id FROM users"
+            "SELECT user_id, chat_id, name FROM users"
         ).fetchall()]
 
 def delete_last_entry(user_id: int) -> int | None:
@@ -125,14 +135,15 @@ def sync_to_sheet(user_id: int, date: str):
         return
     try:
         total    = sum(e["ml"] for e in get_entries(user_id, date))
+        name     = get_user_name(user_id)
         date_fmt = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
         requests.post(
             APPS_SCRIPT_URL,
-            json={"user_id": str(user_id), "date": date_fmt, "total": total},
+            json={"user_id": str(user_id), "name": name, "date": date_fmt, "total": total},
             timeout=10,
             allow_redirects=True,
         )
-        logger.info("Sheets: user %s %s → %d мл", user_id, date_fmt, total)
+        logger.info("Sheets: %s %s → %d мл", name, date_fmt, total)
     except Exception as e:
         logger.warning("Sheets error: %s", e)
 
@@ -198,8 +209,9 @@ def cancel_kb() -> InlineKeyboardMarkup:
 
 # ── /start ──────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    register_user(uid, update.effective_chat.id)
+    uid  = update.effective_user.id
+    name = update.effective_user.first_name or update.effective_user.username or str(uid)
+    register_user(uid, update.effective_chat.id, name)
     await update.message.reply_text(
         "💧 *Трекер воды*\n\n" + build_status(uid),
         reply_markup=main_kb(),
