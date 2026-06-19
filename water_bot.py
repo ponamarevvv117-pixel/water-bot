@@ -112,6 +112,17 @@ def all_users() -> list[dict]:
         ).fetchall()]
 
 # ── Вспомогалки для UI ──────────────────────────────────────────────
+def delete_last_entry(user_id: int) -> int | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id, ml FROM entries WHERE user_id=? AND date=? ORDER BY id DESC LIMIT 1",
+            (user_id, today_msk()),
+        ).fetchone()
+        if row:
+            conn.execute("DELETE FROM entries WHERE id=?", (row["id"],))
+            return row["ml"]
+    return None
+
 def make_bar(total: int, goal: int) -> str:
     pct    = min(100, total * 100 // goal)
     filled = pct // 10
@@ -142,9 +153,15 @@ def main_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("💧 150мл", callback_data="add:150"),
             InlineKeyboardButton("💧 200мл", callback_data="add:200"),
             InlineKeyboardButton("💧 300мл", callback_data="add:300"),
-            InlineKeyboardButton("💧 500мл", callback_data="add:500"),
         ],
-        [InlineKeyboardButton("✏️ Своё количество", callback_data="custom")],
+        [
+            InlineKeyboardButton("💧 500мл", callback_data="add:500"),
+            InlineKeyboardButton("💧 700мл", callback_data="add:700"),
+        ],
+        [
+            InlineKeyboardButton("✏️ Своё количество", callback_data="custom"),
+            InlineKeyboardButton("↩️ Отменить последнее", callback_data="undo"),
+        ],
         [
             InlineKeyboardButton("📅 История", callback_data="history"),
             InlineKeyboardButton("📊 Статистика", callback_data="stats"),
@@ -191,6 +208,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_kb(),
             parse_mode="Markdown",
         )
+
+    # ── Отменить последнее ──
+    elif data == "undo":
+        removed_ml = delete_last_entry(uid)
+        if removed_ml:
+            msg = "💧 *Трекер воды*\n\n" + build_status(uid) + f"\n\n↩️ Отменено: *{removed_ml} мл*"
+        else:
+            msg = "💧 *Трекер воды*\n\n" + build_status(uid) + "\n\n❌ Нечего отменять"
+        await query.edit_message_text(msg, reply_markup=main_kb(), parse_mode="Markdown")
 
     # ── Своё количество ──
     elif data == "custom":
