@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""
-💧 Water Tracker Bot
-Данные хранятся локально в SQLite, изолированно по Telegram user_id.
-Никаких внешних сервисов не требуется.
-"""
 import logging
 import os
 import sqlite3
+import json
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -17,14 +13,18 @@ from telegram.ext import (
     ContextTypes, MessageHandler, filters,
 )
 
-# Токен берётся из переменной окружения BOT_TOKEN
 TOKEN = os.environ["BOT_TOKEN"]
-
 MSK = timezone(timedelta(hours=3))
 
-# DB_PATH: на Railway указывай переменную DB_PATH=/data (persistent volume)
 _db_dir = os.environ.get("DB_PATH", str(Path(__file__).parent))
 DB_PATH = Path(_db_dir) / "water.db"
+
+SPREADSHEET_ID        = os.environ.get("SPREADSHEET_ID", "")
+GOOGLE_CREDENTIALS    = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+SHEETS_SCOPES         = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -111,7 +111,6 @@ def all_users() -> list[dict]:
             "SELECT user_id, chat_id FROM users"
         ).fetchall()]
 
-# ── Вспомогалки для UI ──────────────────────────────────────────────
 def delete_last_entry(user_id: int) -> int | None:
     with db() as conn:
         row = conn.execute(
@@ -123,6 +122,56 @@ def delete_last_entry(user_id: int) -> int | None:
             return row["ml"]
     return None
 
+# ── Google Sheets ────────────────────────────────────────────────────
+def _get_sheet():
+    if not SPREADSHEET_ID or not GOOGLE_CREDENTIALS:
+        return None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds = Credentials.from_service_account_info(
+            json.loads(GOOGLE_CREDENTIALS), scopes=SHEETS_SCOPES
+        )
+        client = gspread.authorize(creds)
+        return client.open_by_key(SPREADSHEET_ID).sheet1
+    except Exception as e:
+        logger.warning("Sheets: не удалось подключиться: %s", e)
+        return None
+
+def _ensure_header(sheet):
+    first = sheet.row_values(1)
+    if not first or first[0] != "№":
+        sheet.insert_row(["№", "ID аккаунта", "Дата", "Выпито (мл)"], 1)
+
+def sync_to_sheet(user_id: int, date: str):
+    sheet = _get_sheet()
+    if not sheet:
+        return
+    try:
+        _ensure_header(sheet)
+        total = sum(e["ml"] for e in get_entries(user_id, date))
+        date_fmt = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
+        uid_str = str(user_id)
+
+        all_rows = sheet.get_all_values()
+        for i, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= 3 and row[1] == uid_str and row[2] == date_fmt:
+                sheet.update_cell(i, 4, total)
+                logger.info("Sheets: обновлена строка %d для user %s (%d мл)", i, uid_str, total)
+                return
+
+        next_num = len(all_rows)  # строк включая заголовок = следующий порядковый №
+        sheet.append_row([next_num, user_id, date_fmt, total])
+        logger.info("Sheets: добавлена строка №%d для user %s (%d мл)", next_num, uid_str, total)
+    except Exception as e:
+        logger.warning("Sheets: ошибка при записи: %s", e)
+
+async def async_sync_to_sheet(user_id: int, date: str):
+    import asyncio
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, sync_to_sheet, user_id, date)
+
+# ── Вспомогалки для UI ──────────────────────────────────────────────
 def make_bar(total: int, goal: int) -> str:
     pct    = min(100, total * 100 // goal)
     filled = pct // 10
@@ -208,6 +257,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_kb(),
             parse_mode="Markdown",
         )
+        await async_sync_to_sheet(uid, today_msk())
 
     # ── Отменить последнее ──
     elif data == "undo":
@@ -217,6 +267,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             msg = "💧 *Трекер воды*\n\n" + build_status(uid) + "\n\n❌ Нечего отменять"
         await query.edit_message_text(msg, reply_markup=main_kb(), parse_mode="Markdown")
+        if removed_ml:
+            await async_sync_to_sheet(uid, today_msk())
 
     # ── Своё количество ──
     elif data == "custom":
@@ -317,6 +369,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_kb(),
             parse_mode="Markdown",
         )
+        await async_sync_to_sheet(uid, today_msk())
 
     elif waiting == "goal":
         try:
@@ -405,12 +458,9 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # Напоминалка каждый час — в начале следующего часа
     now  = datetime.now(MSK)
     secs = (60 - now.minute) * 60 - now.second
     app.job_queue.run_repeating(reminder_job, interval=3600, first=secs)
-
-    # Реклама каждый день в 12:00 МСК (= 09:00 UTC)
     app.job_queue.run_daily(promo_job, time=dt.time(9, 0, 0, tzinfo=timezone.utc))
 
     logger.info("Бот запущен. Первое напоминание через %d сек.", secs)
