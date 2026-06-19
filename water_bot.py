@@ -309,20 +309,27 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Напоминалка каждый час ──────────────────────────────────────────
 async def reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(MSK)
+    now   = datetime.now(MSK)
+    users = all_users()
+    logger.info("reminder_job: час=%d МСК, пользователей=%d", now.hour, len(users))
+
     if not (8 <= now.hour < 19):
+        logger.info("reminder_job: вне рабочего времени, пропускаем")
         return
 
-    for user in all_users():
+    for user in users:
         uid     = user["user_id"]
         chat_id = user["chat_id"]
         goal    = get_goal(uid)
         total   = sum(e["ml"] for e in get_entries(uid))
+        remain  = max(0, goal - total)
+        pct     = total * 100 // goal
+
         if total >= goal:
+            logger.info("reminder_job: user %s норма выполнена (%d мл), пропускаем", uid, total)
             continue
 
-        remain = goal - total
-        pct    = total * 100 // goal
+        logger.info("reminder_job: отправляем user %s (%d мл из %d)", uid, total, goal)
         try:
             await ctx.bot.send_message(
                 chat_id=chat_id,
@@ -341,11 +348,13 @@ async def reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
         except Exception as e:
-            logger.warning("Reminder failed for %s: %s", chat_id, e)
+            logger.warning("reminder_job: ошибка для chat %s: %s", chat_id, e)
 
 # ── Ежедневная реклама в 12:00 МСК ─────────────────────────────────
 async def promo_job(ctx: ContextTypes.DEFAULT_TYPE):
-    for user in all_users():
+    users = all_users()
+    logger.info("promo_job: пользователей=%d", len(users))
+    for user in users:
         chat_id = user["chat_id"]
         try:
             await ctx.bot.send_message(
@@ -356,8 +365,9 @@ async def promo_job(ctx: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 text="https://www.instagram.com/alleksashka.a?igsh=MTZ2OGx5eXd2b2xoYw%3D%3D&utm_source=qr",
             )
+            logger.info("promo_job: отправлено chat %s", chat_id)
         except Exception as e:
-            logger.warning("Promo failed for %s: %s", chat_id, e)
+            logger.warning("promo_job: ошибка для chat %s: %s", chat_id, e)
 
 # ── Запуск ──────────────────────────────────────────────────────────
 def main():
