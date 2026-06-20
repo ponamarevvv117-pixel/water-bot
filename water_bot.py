@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import io
 import logging
+import math
 import os
 import sqlite3
 import json
@@ -8,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
+from PIL import Image, ImageDraw, ImageFont
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -150,6 +153,155 @@ def sync_to_sheet(user_id: int, date: str):
 async def async_sync_to_sheet(user_id: int, date: str):
     import asyncio
     await asyncio.get_event_loop().run_in_executor(None, sync_to_sheet, user_id, date)
+
+# ── Шрифты для PNG-отчёта ────────────────────────────────────────────
+_FONT_URLS = {
+    "Montserrat-Bold.ttf":    "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Bold.ttf",
+    "Montserrat-Regular.ttf": "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Regular.ttf",
+    "Montserrat-Light.ttf":   "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Light.ttf",
+}
+
+def ensure_fonts():
+    for name, url in _FONT_URLS.items():
+        path = DB_PATH.parent / name
+        if not path.exists():
+            logger.info("Скачиваю шрифт %s...", name)
+            try:
+                r = requests.get(url, timeout=30)
+                r.raise_for_status()
+                path.write_bytes(r.content)
+                logger.info("Шрифт скачан: %s", name)
+            except Exception as e:
+                logger.warning("Не удалось скачать шрифт %s: %s", name, e)
+
+def _fnt(name: str, size: int) -> ImageFont.FreeTypeFont:
+    path = DB_PATH.parent / name
+    try:
+        return ImageFont.truetype(str(path), size)
+    except Exception:
+        return ImageFont.load_default()
+
+def _gradient_img(w: int, h: int, c1: tuple, c2: tuple) -> Image.Image:
+    img  = Image.new("RGB", (w, h))
+    draw = ImageDraw.Draw(img)
+    for x in range(w):
+        r = int(c1[0] + (c2[0]-c1[0]) * x / w)
+        g = int(c1[1] + (c2[1]-c1[1]) * x / w)
+        b = int(c1[2] + (c2[2]-c1[2]) * x / w)
+        draw.line([(x, 0), (x, h)], fill=(r, g, b))
+    return img
+
+def generate_report(user_id: int, date: str) -> bytes:
+    entries = get_entries(user_id, date)
+    goal    = get_goal(user_id)
+    name    = get_user_name(user_id)
+    total   = sum(e["ml"] for e in entries)
+    remain  = max(0, goal - total)
+    pct     = min(100, total * 100 // goal)
+    done    = total >= goal
+
+    dt_obj   = datetime.strptime(date, "%Y-%m-%d")
+    days_ru  = ["ПОНЕДЕЛЬНИК","ВТОРНИК","СРЕДА","ЧЕТВЕРГ","ПЯТНИЦА","СУББОТА","ВОСКРЕСЕНЬЕ"]
+    day_str  = f"{days_ru[dt_obj.weekday()]}  ·  {dt_obj.strftime('%d.%m.%Y')}"
+
+    W, H, PAD = 900, 480, 58
+    CYAN     = (0,  230, 255)
+    PINK     = (255, 30, 110)
+    WHITE    = (255, 255, 255)
+    LAVENDER = (150, 160, 220)
+    DIM      = (80,  90,  150)
+
+    img  = _gradient_img(W, H, (4, 8, 35), (18, 4, 52))
+    draw = ImageDraw.Draw(img, "RGBA")
+
+    # ── Геометрия ──
+    def ring(cx, cy, r, color, w=1):
+        draw.ellipse([cx-r, cy-r, cx+r, cy+r], outline=color, width=w)
+
+    ring(850, -30,  300, (*WHITE,  18))
+    ring(830,  20,  220, (*WHITE,  10))
+    ring(-40, H+30, 210, (*CYAN,   22))
+    ring(W-90, H-40, 130, (*PINK,  18))
+
+    for i in range(3):
+        o = i * 12
+        draw.line([(o, H-80+o), (90+o, H+10+o)], fill=(*PINK, 35), width=1)
+
+    for dx, dy in [(700,390),(716,380),(732,390),(748,380),(764,390)]:
+        draw.ellipse([dx-2, dy-2, dx+2, dy+2], fill=(*CYAN, 90))
+
+    cx_c, cy_c = W-95, 68
+    draw.line([(cx_c-14, cy_c), (cx_c+14, cy_c)], fill=(*CYAN, 120), width=1)
+    draw.line([(cx_c, cy_c-14), (cx_c, cy_c+14)], fill=(*CYAN, 120), width=1)
+
+    draw.rectangle([PAD-16, 85, PAD-12, 228], fill=(*CYAN, 220))
+
+    for y in range(0, H, 40):
+        draw.line([(0, y), (W, y)], fill=(255, 255, 255, 5), width=1)
+
+    # ── Шрифты ──
+    f_small  = _fnt("Montserrat-Regular.ttf", 21)
+    f_medium = _fnt("Montserrat-Bold.ttf",    28)
+    f_label  = _fnt("Montserrat-Bold.ttf",    34)
+    f_huge   = _fnt("Montserrat-Bold.ttf",   122)
+
+    # ── Контент ──
+    draw.ellipse([PAD, 37, PAD+7, 44], fill=CYAN)
+    draw.text((PAD+14, 31), day_str, font=f_small, fill=LAVENDER)
+
+    draw.text((PAD, 80), str(total), font=f_huge, fill=WHITE)
+    draw.text((PAD, 220), "МЛ ВЫПИТО", font=f_label, fill=LAVENDER)
+    draw.text((PAD, 265), f"ЦЕЛЬ  {goal} МЛ", font=f_small, fill=DIM)
+
+    draw.line([(PAD, 308), (W-PAD, 308)], fill=(255, 255, 255, 20), width=1)
+
+    bx, by, bw, bh = PAD, 322, 700, 7
+    draw.rounded_rectangle([bx, by, bx+bw, by+bh], radius=4, fill=(255, 255, 255, 28))
+    fw = int(bw * pct / 100)
+    if fw > 6:
+        bar  = Image.new("RGBA", (fw, bh), (0, 0, 0, 0))
+        bd   = ImageDraw.Draw(bar)
+        for xi in range(fw):
+            t = xi / fw
+            bd.line([(xi,0),(xi,bh)], fill=(
+                int(CYAN[0]*(1-t)+160*t),
+                int(CYAN[1]*(1-t)+ 40*t),
+                int(CYAN[2]*(1-t)+255*t), 255
+            ))
+        mask = Image.new("L", (fw, bh), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0,0,fw,bh], radius=4, fill=255)
+        img.paste(bar, (bx, by), mask)
+
+    draw.text((bx+bw+16, by-10), f"{pct}%", font=f_medium, fill=WHITE)
+
+    if done:
+        draw.text((PAD, 350), "НОРМА ВЫПОЛНЕНА", font=f_label, fill=(80, 255, 150))
+    else:
+        draw.text((PAD, 350), f"ОСТАЛОСЬ  {remain} МЛ", font=f_label, fill=LAVENDER)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf.read()
+
+# ── Ежедневный PNG-отчёт в 21:00 МСК ───────────────────────────────
+async def daily_report_job(ctx: ContextTypes.DEFAULT_TYPE):
+    import asyncio
+    today = today_msk()
+    users = all_users()
+    logger.info("daily_report_job: пользователей=%d", len(users))
+    for user in users:
+        uid     = user["user_id"]
+        chat_id = user["chat_id"]
+        try:
+            img_bytes = await asyncio.get_event_loop().run_in_executor(
+                None, generate_report, uid, today
+            )
+            await ctx.bot.send_photo(chat_id=chat_id, photo=img_bytes,
+                                     caption="📊 Итог дня")
+            logger.info("daily_report_job: отправлено chat %s", chat_id)
+        except Exception as e:
+            logger.warning("daily_report_job: ошибка chat %s: %s", chat_id, e)
 
 # ── Вспомогалки для UI ──────────────────────────────────────────────
 def make_bar(total: int, goal: int) -> str:
@@ -402,16 +554,18 @@ async def promo_job(ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     import datetime as dt
     init_db()
+    ensure_fonts()
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    # 10:00 МСК = 07:00 UTC, 16:00 МСК = 13:00 UTC
-    app.job_queue.run_daily(reminder_job, time=dt.time(7,  0, 0, tzinfo=timezone.utc))
-    app.job_queue.run_daily(reminder_job, time=dt.time(13, 0, 0, tzinfo=timezone.utc))
-    app.job_queue.run_daily(promo_job,    time=dt.time(9,  0, 0, tzinfo=timezone.utc))
+    # 10:00 МСК = 07:00 UTC, 16:00 МСК = 13:00 UTC, 21:00 МСК = 18:00 UTC
+    app.job_queue.run_daily(reminder_job,    time=dt.time(7,  0, 0, tzinfo=timezone.utc))
+    app.job_queue.run_daily(reminder_job,    time=dt.time(13, 0, 0, tzinfo=timezone.utc))
+    app.job_queue.run_daily(promo_job,       time=dt.time(9,  0, 0, tzinfo=timezone.utc))
+    app.job_queue.run_daily(daily_report_job,time=dt.time(18, 0, 0, tzinfo=timezone.utc))
 
     logger.info("Бот запущен. Напоминания в 10:00 и 16:00 МСК.")
     app.run_polling(drop_pending_updates=True)
