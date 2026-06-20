@@ -350,11 +350,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
     now   = datetime.now(MSK)
     users = all_users()
-    logger.info("reminder_job: час=%d МСК, пользователей=%d", now.hour, len(users))
-
-    if not (8 <= now.hour < 19):
-        logger.info("reminder_job: вне рабочего времени, пропускаем")
-        return
+    logger.info("reminder_job: %02d:%02d МСК, пользователей=%d", now.hour, now.minute, len(users))
 
     for user in users:
         uid     = user["user_id"]
@@ -412,12 +408,12 @@ def main():
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    now  = datetime.now(MSK)
-    secs = (60 - now.minute) * 60 - now.second
-    app.job_queue.run_repeating(reminder_job, interval=3600, first=secs)
-    app.job_queue.run_daily(promo_job, time=dt.time(9, 0, 0, tzinfo=timezone.utc))
+    # 10:00 МСК = 07:00 UTC, 16:00 МСК = 13:00 UTC
+    app.job_queue.run_daily(reminder_job, time=dt.time(7,  0, 0, tzinfo=timezone.utc))
+    app.job_queue.run_daily(reminder_job, time=dt.time(13, 0, 0, tzinfo=timezone.utc))
+    app.job_queue.run_daily(promo_job,    time=dt.time(9,  0, 0, tzinfo=timezone.utc))
 
-    logger.info("Бот запущен. Первое напоминание через %d сек.", secs)
+    logger.info("Бот запущен. Напоминания в 10:00 и 16:00 МСК.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
